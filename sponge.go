@@ -1,11 +1,14 @@
 package main
 
-import "net/http"
-import "encoding/json"
-import "fmt"
-import "time"
-import "os"
-import "sync"
+import (
+	"encoding/json"
+	"flag"
+	"fmt"
+	"net/http"
+	"os"
+	"sync"
+	"time"
+)
 
 /*
    TODO:
@@ -25,7 +28,9 @@ import "sync"
    - filter Hacker News if no url
 */
 var itemsToFetch = 10
-var outputLocation = "/tmp/sponge_out.txt"
+
+// this makes a pointer to a string that gets filled in your main function.
+var outputLocation = flag.String("out", "/tmp/sponge_out.txt", "Output file")
 
 type Formatted struct {
 	Body string
@@ -45,32 +50,39 @@ func (h HackerNewsItem) getFormatted() Formatted {
 		Body: fmt.Sprintf("Title: %s\nUrl: %s", h.Title, h.Url)}
 }
 
-func getHackerNews() []Formatted {
+func getHackerNews() []Formatted, err {
 	hackerNewsListUrl := "https://hacker-news.firebaseio.com/v0/topstories.json"
 	hackerNewsItemUrl := "https://hacker-news.firebaseio.com/v0/item/%d.json"
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get(hackerNewsListUrl)
 	if err != nil {
-		fmt.Println(err)
-		return make([]Formatted, 0)
+		// https://play.golang.org/p/S_zMsozkyc
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	hnl := make([]int, 0)
+	var hnl []int
 	decoder := json.NewDecoder(resp.Body)
 	decoder.Decode(&hnl)
 
 	// take only top items (returns 500 initially)
-	hnTopItems := make([]int, itemsToFetch)
-	copy(hnTopItems, hnl[:itemsToFetch])
+	var hnTopItems []int
+	hnTopItems = append(hnTopItems, ...hnl[:itemsToFetch])
 
-	hnTopItemsDetails := make([]Formatted, 0)
+	var hnTopItemsDetails []Formatted
 
+	collectorChan := make(chan Formatted)
+	
 	var wg sync.WaitGroup
-	wg.Add(itemsToFetch)
+	wg.Add(len(hnTopItems))
 
 	for _, id := range hnTopItems {
+		// id := id
+		//
+		// I prefer doing ^^^ but you are doing a perfectly valid pattern by passing the id in as its same name.
+		// I like the closure method rather than the parameter passing method because it doesn't require knowledge
+		// of the beginning of the function at the end unless it's actually necessary.
 		go func(id int) {
 			defer wg.Done()
 
@@ -83,17 +95,30 @@ func getHackerNews() []Formatted {
 
 			item := HackerNewsItem{}
 			decoder := json.NewDecoder(resp.Body)
-			dec_err := decoder.Decode(&item)
-			if dec_err != nil {
+			if dec_err := decoder.Decode(&item); dec_err != nil {
 				print("error!", err)
 			} else {
-				hnTopItemsDetails = append(hnTopItemsDetails, item.getFormatted())
-
+				collectorChan <- item.getFormatted()
 			}
 		}(id)
 	}
-
-	wg.Wait()
+	
+	go func() {
+		// this is in the goroutine because the range over the channel needs to block
+		// exit of the outer function.
+		// This goroutine with its waitgroup and close will guarantee that the for loop
+		// runs entirely and then exits when the waitgroup is finished.
+		// the wg.Add must happen *before* this goroutine is spawned but this goroutine
+		// can exist anywhere after the wg.Add, including *just* after the wg.Add if you
+		// want to keep the control code together.  I'd usually recommend that but I wanted
+		// to keep the diff somewhat locally relevant.
+		wg.Wait()
+		close(collectorChan)
+	}()
+	
+	for item := range collectorChan {
+		hnTopItemsDetails = append(hnTopItemsDetails, item)
+	}
 
 	return hnTopItemsDetails
 }
@@ -235,12 +260,13 @@ func writeSection(f *os.File, sectionName string, items []Formatted) {
 }
 
 func main() {
+	flag.Parse()
 
 	redditItems := getRedditGolang()
 	hackerNewsItems := getHackerNews()
 	nytItems := getNyt()
 
-	f, err := os.Create(outputLocation)
+	f, err := os.Create(*outputLocation)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -251,5 +277,5 @@ func main() {
 	writeSection(f, "Hacker News", hackerNewsItems)
 	writeSection(f, "Reddit Golang", redditItems)
 
-	fmt.Printf("Done writing output to %s\n", outputLocation)
+	fmt.Printf("Done writing output to %s\n", *outputLocation)
 }
